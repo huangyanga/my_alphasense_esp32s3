@@ -204,12 +204,13 @@ inline Adafruit_ST7789* lcdGetTft() {
 //   - 测试结束(lcdCurveEnd)在底部信息区大字号显示平均值(avg)与最后值(last)
 // ============================================================
 #define LCD_CURVE_POINTS   600          // 单次测试最大缓存点数（1点/秒≈10分钟，超出丢最旧）
-#define LCD_CURVE_X0       30           // 曲线区域左边界（左侧留Y轴刻度）
+#define LCD_CURVE_WINDOW   120          // 滑动窗口：显示最近120点（1点/秒≈2分钟），逐点右移
+#define LCD_CURVE_X0       42           // 曲线区域左边界（左侧留Y轴自适应刻度）
 #define LCD_CURVE_X1       314          // 曲线区域右边界
 #define LCD_CURVE_Y0       25           // 曲线区域上边界
 #define LCD_CURVE_Y1       190          // 曲线区域下边界
-#define LCD_CURVE_PPM_MIN  (-5.0f)      // 纵轴最小值 (ppm)
-#define LCD_CURVE_PPM_MAX  ( 5.0f)      // 纵轴最大值 (ppm)
+#define LCD_CURVE_PPM_MIN  (-1.0f)      // 纵轴默认下限 (ppm，自适应前)
+#define LCD_CURVE_PPM_MAX  ( 1.0f)      // 纵轴默认上限 (ppm，自适应前)
 
 static float    _curveBuf[LCD_CURVE_POINTS];
 static uint16_t _curveCount = 0;        // 本次测试已有点数
@@ -226,39 +227,75 @@ inline void lcdDrawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t
 inline void lcdFillCircle(int16_t x, int16_t y, int16_t r, uint16_t c);
 inline void lcdPrintText(int16_t x, int16_t y, const char* s, uint16_t c, uint8_t size);
 
-// 值 -> Y 坐标（PPM_MIN~PPM_MAX 映射到 Y1~Y0，支持负值）
+// ------------------------------------------------------------
+// 纵轴自适应：按本次测试窗口内数据 min/max 动态缩放，便于观看
+// ------------------------------------------------------------
+static float _lcdYMin = LCD_CURVE_PPM_MIN;   // 当前纵轴范围
+static float _lcdYMax = LCD_CURVE_PPM_MAX;
+static float _lcdYMinPrev = 1e9f;            // 上次范围（判断刻度是否需要重画）
+static float _lcdYMaxPrev = -1e9f;
+
+// 值 -> Y 坐标（_lcdYMin~_lcdYMax 映射到 Y1~Y0，支持负值）
 inline int lcdCurveY(float v) {
-    float ratio = (v - LCD_CURVE_PPM_MIN) / (LCD_CURVE_PPM_MAX - LCD_CURVE_PPM_MIN);
+    float ratio = (v - _lcdYMin) / (_lcdYMax - _lcdYMin);
     if (ratio < 0.0f) ratio = 0.0f;
     if (ratio > 1.0f) ratio = 1.0f;
     return LCD_CURVE_Y1 - (int)(ratio * (LCD_CURVE_Y1 - LCD_CURVE_Y0));
 }
 
-// 刻度标签（-5 / -2.5 / 0 / 2.5 / 5 ppm，固定内容只画一次）
+// 计算自适应纵轴范围（当前窗口数据 min/max ± 15% 边距，最小跨度0.05ppm）
+inline void lcdCurveCalcYRange() {
+    if (_curveCount == 0) { _lcdYMin = LCD_CURVE_PPM_MIN; _lcdYMax = LCD_CURVE_PPM_MAX; return; }
+    float mn = _curveBuf[0], mx = _curveBuf[0];
+    for (uint16_t i = 1; i < _curveCount; i++) {
+        if (_curveBuf[i] < mn) mn = _curveBuf[i];
+        if (_curveBuf[i] > mx) mx = _curveBuf[i];
+    }
+    float span = mx - mn;
+    if (span < 0.05f) span = 0.05f;
+    float m = span * 0.15f;
+    _lcdYMin = mn - m;
+    _lcdYMax = mx + m;
+}
+
+// 刻度数值格式化：保留2位小数并去尾零（0.50→"0.5"，1.00→"1"）
+inline void lcdFormatPpm(float v, char* buf, size_t n) {
+    if (fabsf(v) < 0.0005f) { snprintf(buf, n, "0"); return; }
+    snprintf(buf, n, "%.2f", v);
+    int len = strlen(buf);
+    while (len > 1 && buf[len - 1] == '0') { buf[len - 1] = '\0'; len--; }
+    if (len > 1 && buf[len - 1] == '.') { buf[len - 1] = '\0'; }
+}
+
+// 刻度标签（当前纵轴范围 5 等分，先擦除旧标签区再重画）
 inline void lcdCurveDrawLabels() {
     if (!_tft) return;
-    const char* labels[5] = {"-5", "-2.5", "0", "2.5", "5"};
-    for (int g = 0; g < 5; g++) {
-        int y = LCD_CURVE_Y1 - g * (LCD_CURVE_Y1 - LCD_CURVE_Y0) / 4;
-        // 刻度标签（右对齐到曲线区左缘）
-        int w = strlen(labels[g]) * 6;
-        lcdPrintText(LCD_CURVE_X0 - 3 - w, y - 4, labels[g], ST77XX_WHITE, 1);
+    // 擦除左侧标签区（x < X0）
+    lcdFillRect(0, LCD_CURVE_Y0, LCD_CURVE_X0 - 1, LCD_CURVE_Y1 - LCD_CURVE_Y0 + 1, ST77XX_BLACK);
+    char buf[12];
+    for (int g = 0; g <= 4; g++) {
+        float v = _lcdYMin + (_lcdYMax - _lcdYMin) * g / 4.0f;
+        int y = lcdCurveY(v);
+        lcdFormatPpm(v, buf, sizeof(buf));
+        int w = strlen(buf) * 6;
+        lcdPrintText(LCD_CURVE_X0 - 3 - w, y - 4, buf, ST77XX_WHITE, 1);
     }
 }
 
-// 固定框架标志：true 后边框/刻度/网格不再重画（测试开始也不清）
+// 固定框架标志：true 后边框不再重画（测试开始也不清）
 static bool _lcdFrameDrawn = false;
 
-// 网格线（-2.5 / 0 / 2.5 三条内部水平线；-5 和 5 即边框本身）
+// 网格线（当前范围 25% / 50% / 75% 三条内部水平线，中线白色）
 inline void lcdCurveDrawGrid() {
     for (int g = 1; g <= 3; g++) {
-        int y = LCD_CURVE_Y1 - g * (LCD_CURVE_Y1 - LCD_CURVE_Y0) / 4;
+        float v = _lcdYMin + (_lcdYMax - _lcdYMin) * g / 4.0f;
+        int y = lcdCurveY(v);
         uint16_t gridColor = (g == 2) ? ST77XX_WHITE : ST77XX_BLUE;
         lcdDrawHLine(LCD_CURVE_X0 + 1, y, LCD_CURVE_X1 - LCD_CURVE_X0 - 1, gridColor);
     }
 }
 
-// 固定框架（边框 + 刻度标签 + 网格）：只在初始化/首次清空时绘制一次
+// 固定框架（边框 + 初始刻度 + 网格）：只在初始化/首次清空时绘制一次
 inline void lcdCurveDrawFrame() {
     if (_lcdFrameDrawn) return;
     _lcdFrameDrawn = true;
@@ -267,6 +304,8 @@ inline void lcdCurveDrawFrame() {
                 LCD_CURVE_Y1 - LCD_CURVE_Y0 + 1, ST77XX_WHITE);
     lcdCurveDrawLabels();
     lcdCurveDrawGrid();
+    _lcdYMinPrev = _lcdYMin;
+    _lcdYMaxPrev = _lcdYMax;
 }
 
 // 在标题栏右侧显示最新值（ppb，大字号，位于曲线区域之外不遮挡曲线）
@@ -285,30 +324,46 @@ inline void lcdCurveDrawLatest(float lastPpb) {
     lcdPrintText(tx + 2, ty + 1, buf, ST77XX_YELLOW, 2);
 }
 
-// 重绘曲线区域（只刷新内部：清内部 + 网格 + 折线；边框/刻度标签固定不动）
-// 横轴：本次测试的数据点均匀分布在 X0~X1（按实际点数缩放）
+// 重绘曲线区域（只刷新内部：自适应纵轴 + 网格 + 滑动窗口折线；边框固定不动）
+// 横轴：显示最近 LCD_CURVE_WINDOW 个点，固定间距，新点从右逐点进入（滑动窗口）
 inline void lcdCurveRedraw() {
     if (!_tft) return;
+
+    // 自适应纵轴范围（按当前窗口数据）
+    lcdCurveCalcYRange();
 
     // 只清曲线内部（保留 1px 边框）
     lcdFillRect(LCD_CURVE_X0 + 1, LCD_CURVE_Y0 + 1,
                 LCD_CURVE_X1 - LCD_CURVE_X0 - 1,
                 LCD_CURVE_Y1 - LCD_CURVE_Y0 - 1, ST77XX_BLACK);
-    // 网格（先画，折线叠其上；每次重画但位置固定、开销极小，无可见刷新）
+    // 网格（先画，折线叠其上）
     lcdCurveDrawGrid();
+    // 刻度标签：仅在纵轴范围变化时重画（避免无谓刷新）
+    if (fabsf(_lcdYMin - _lcdYMinPrev) > 0.001f ||
+        fabsf(_lcdYMax - _lcdYMaxPrev) > 0.001f) {
+        lcdCurveDrawLabels();
+        _lcdYMinPrev = _lcdYMin;
+        _lcdYMaxPrev = _lcdYMax;
+    }
 
     if (_curveCount == 0) return;
-    if (_curveCount == 1) {  // 单点画圆点
-        lcdFillCircle(LCD_CURVE_X0, lcdCurveY(_curveBuf[0]), 2, ST77XX_GREEN);
+
+    // 取最近 LCD_CURVE_WINDOW 个点
+    uint16_t n = _curveCount;
+    uint16_t start = 0;
+    if (n > LCD_CURVE_WINDOW) { start = n - LCD_CURVE_WINDOW; n = LCD_CURVE_WINDOW; }
+
+    if (n == 1) {  // 单点画圆点
+        lcdFillCircle(LCD_CURVE_X0, lcdCurveY(_curveBuf[start]), 2, ST77XX_GREEN);
         return;
     }
 
     int span = LCD_CURVE_X1 - LCD_CURVE_X0;
-    for (uint16_t i = 1; i < _curveCount; i++) {
-        int x1 = LCD_CURVE_X0 + (int)((long)(i - 1) * span / (_curveCount - 1));
-        int x2 = LCD_CURVE_X0 + (int)((long)i * span / (_curveCount - 1));
-        int y1 = lcdCurveY(_curveBuf[i - 1]);
-        int y2 = lcdCurveY(_curveBuf[i]);
+    for (uint16_t i = 1; i < n; i++) {
+        int x1 = LCD_CURVE_X0 + (int)((long)(i - 1) * span / (LCD_CURVE_WINDOW - 1));
+        int x2 = LCD_CURVE_X0 + (int)((long)i * span / (LCD_CURVE_WINDOW - 1));
+        int y1 = lcdCurveY(_curveBuf[start + i - 1]);
+        int y2 = lcdCurveY(_curveBuf[start + i]);
         lcdDrawLine(x1, y1, x2, y2, ST77XX_GREEN);
     }
 }
