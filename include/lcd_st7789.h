@@ -227,6 +227,8 @@ inline void lcdDrawHLine(int16_t x, int16_t y, int16_t w, uint16_t c);
 inline void lcdDrawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t c);
 inline void lcdFillCircle(int16_t x, int16_t y, int16_t r, uint16_t c);
 inline void lcdPrintText(int16_t x, int16_t y, const char* s, uint16_t c, uint8_t size);
+inline void lcdCurveSavePrev();   // 前向声明（定义见下方位带渲染区）
+inline void lcdCurveErasePrev();  // 前向声明（定义见下方位带渲染区）
 
 // ------------------------------------------------------------
 // 纵轴自适应：按本次测试窗口内数据 min/max 动态缩放，便于观看
@@ -325,27 +327,29 @@ inline void lcdCurveDrawLatest(float lastPpb) {
     lcdPrintText(tx + 2, ty + 1, buf, ST77XX_YELLOW, 2);
 }
 
-// 重绘曲线区域（只刷新内部：自适应纵轴 + 网格 + 横轴窗口折线；边框固定不动）
-// 横轴：以 _lcdCurveWindowPts（下行测试时长秒数）为整宽范围，固定间距逐点右移，
-//       测试结束时恰好铺满整宽
+// 重绘曲线区域（只刷新内部；边框固定不动）
+//  - 纵轴范围变化 → 整区重画（清内部+网格+刻度，旧折线随之清除）
+//  - 范围不变     → 只擦除旧折线，网格/刻度保持不动（三条横线位置不变时不刷新）
 inline void lcdCurveRedraw() {
     if (!_tft) return;
 
     // 自适应纵轴范围（按当前窗口数据）
     lcdCurveCalcYRange();
+    bool rangeChanged = (fabsf(_lcdYMin - _lcdYMinPrev) > 0.001f ||
+                         fabsf(_lcdYMax - _lcdYMaxPrev) > 0.001f);
 
-    // 只清曲线内部（保留 1px 边框）
-    lcdFillRect(LCD_CURVE_X0 + 1, LCD_CURVE_Y0 + 1,
-                LCD_CURVE_X1 - LCD_CURVE_X0 - 1,
-                LCD_CURVE_Y1 - LCD_CURVE_Y0 - 1, ST77XX_BLACK);
-    // 网格（先画，折线叠其上）
-    lcdCurveDrawGrid();
-    // 刻度标签：仅在纵轴范围变化时重画（避免无谓刷新）
-    if (fabsf(_lcdYMin - _lcdYMinPrev) > 0.001f ||
-        fabsf(_lcdYMax - _lcdYMaxPrev) > 0.001f) {
+    if (rangeChanged) {
+        // 范围变化：整区重画（清内部 + 网格 + 刻度）
+        lcdFillRect(LCD_CURVE_X0 + 1, LCD_CURVE_Y0 + 1,
+                    LCD_CURVE_X1 - LCD_CURVE_X0 - 1,
+                    LCD_CURVE_Y1 - LCD_CURVE_Y0 - 1, ST77XX_BLACK);
+        lcdCurveDrawGrid();
         lcdCurveDrawLabels();
         _lcdYMinPrev = _lcdYMin;
         _lcdYMaxPrev = _lcdYMax;
+    } else {
+        // 范围不变：只擦除上次折线（网格/刻度保持不动）
+        lcdCurveErasePrev();
     }
 
     if (_curveCount == 0) return;
@@ -375,6 +379,7 @@ inline void lcdCurveRedraw() {
 inline void lcdShowInfo(float wa_mv, float ppb, float flow, float duty);  // 前向声明（定义见下方）
 
 inline void lcdCurveAdd(float valuePpm) {
+    lcdCurveSavePrev();   // 记录当前屏幕上的折线（供下次精确擦除）
     if (_curveCount >= LCD_CURVE_POINTS) {
         // 超出缓存：丢弃最旧点，保留最近 LCD_CURVE_POINTS 个
         memmove(_curveBuf, _curveBuf + 1, (LCD_CURVE_POINTS - 1) * sizeof(float));
@@ -417,6 +422,45 @@ inline void lcdCurveSetWindow(uint16_t seconds) {
         if (_lcdCurveWindowPts > LCD_CURVE_POINTS) _lcdCurveWindowPts = LCD_CURVE_POINTS;
     }
     lcdCurveReset();
+}
+
+// ------------------------------------------------------------
+// 上次绘制的折线缓存（供范围不变时精确擦除，网格/刻度保持不动）
+// ------------------------------------------------------------
+static float    _curvePrev[LCD_CURVE_POINTS];
+static uint16_t _curvePrevCount = 0;
+static uint16_t _curvePrevStart = 0;
+
+// 在添加新点前记录当前窗口（即屏幕上刚画出的折线）
+inline void lcdCurveSavePrev() {
+    _curvePrevCount = _curveCount;
+    if (_curvePrevCount > _lcdCurveWindowPts) {
+        _curvePrevStart = _curveCount - _lcdCurveWindowPts;
+        _curvePrevCount = _lcdCurveWindowPts;
+    } else {
+        _curvePrevStart = 0;
+    }
+    if (_curvePrevCount > 0) {
+        memcpy(_curvePrev, &_curveBuf[_curvePrevStart], _curvePrevCount * sizeof(float));
+    }
+}
+
+// 用黑色重画上次折线以擦除（范围不变时调用；网格/刻度不受影响）
+inline void lcdCurveErasePrev() {
+    if (_curvePrevCount == 0) return;
+    if (_curvePrevCount == 1) {
+        lcdFillCircle(LCD_CURVE_X0, lcdCurveY(_curvePrev[0]), 2, ST77XX_BLACK);
+        return;
+    }
+    int span = LCD_CURVE_X1 - LCD_CURVE_X0;
+    uint16_t denom = (_lcdCurveWindowPts > 1) ? (_lcdCurveWindowPts - 1) : 1;
+    for (uint16_t i = 1; i < _curvePrevCount; i++) {
+        int x1 = LCD_CURVE_X0 + (int)((long)(i - 1) * span / denom);
+        int x2 = LCD_CURVE_X0 + (int)((long)i * span / denom);
+        int y1 = lcdCurveY(_curvePrev[i - 1]);
+        int y2 = lcdCurveY(_curvePrev[i]);
+        lcdDrawLine(x1, y1, x2, y2, ST77XX_BLACK);
+    }
 }
 
 // 底部实时信息区（wa=信号mV, ppb=浓度, flow=流量sccm, duty=泵占空比%）
