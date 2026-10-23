@@ -51,7 +51,7 @@ static Adafruit_ST7789* _tft    = nullptr;
                                  // （方案B板无XL9555，若实测发现电源需GPIO使能，改成对应脚号）
 
 // 固件版本号（显示在LCD标题栏右侧）
-#define LCD_FW_VERSION      "v1.0"
+#define LCD_FW_VERSION      "1.0.00"
 
 static bool _lcdVariantB = false;  // true = IO10 低电平，RST/BL 用直连 GPIO
 
@@ -363,8 +363,8 @@ inline void lcdShowCo2(float ppm) {
     char buf[20];
     snprintf(buf, sizeof(buf), "CO2 %dppm", (int)ppm);
     int w = strlen(buf) * 6 + 2;
-    lcdFillRect(105, 3, w, 10, ST77XX_BLACK);   // 清背景重绘
-    lcdPrintText(105, 5, buf, ST77XX_WHITE, 1);
+    lcdFillRect(115, 3, w, 10, ST77XX_BLACK);   // 清背景重绘
+    lcdPrintText(115, 5, buf, ST77XX_WHITE, 1);
 }
 
 // ------------------------------------------------------------
