@@ -234,21 +234,39 @@ inline int lcdCurveY(float v) {
     return LCD_CURVE_Y1 - (int)(ratio * (LCD_CURVE_Y1 - LCD_CURVE_Y0));
 }
 
-// 绘制 Y 轴刻度与网格线（-5 / -2.5 / 0 / 2.5 / 5 ppm）
-inline void lcdCurveDrawScale() {
+// 刻度标签（-5 / -2.5 / 0 / 2.5 / 5 ppm，固定内容只画一次）
+inline void lcdCurveDrawLabels() {
     if (!_tft) return;
     const char* labels[5] = {"-5", "-2.5", "0", "2.5", "5"};
     for (int g = 0; g < 5; g++) {
         int y = LCD_CURVE_Y1 - g * (LCD_CURVE_Y1 - LCD_CURVE_Y0) / 4;
-        // 网格线（0 线用白色醒目，其余用蓝色）
-        uint16_t gridColor = (g == 2) ? ST77XX_WHITE : ST77XX_BLUE;
-        if (g > 0 && g < 4) {
-            lcdDrawHLine(LCD_CURVE_X0 + 1, y, LCD_CURVE_X1 - LCD_CURVE_X0 - 1, gridColor);
-        }
         // 刻度标签（右对齐到曲线区左缘）
         int w = strlen(labels[g]) * 6;
         lcdPrintText(LCD_CURVE_X0 - 3 - w, y - 4, labels[g], ST77XX_WHITE, 1);
     }
+}
+
+// 固定框架标志：true 后边框/刻度/网格不再重画（测试开始也不清）
+static bool _lcdFrameDrawn = false;
+
+// 网格线（-2.5 / 0 / 2.5 三条内部水平线；-5 和 5 即边框本身）
+inline void lcdCurveDrawGrid() {
+    for (int g = 1; g <= 3; g++) {
+        int y = LCD_CURVE_Y1 - g * (LCD_CURVE_Y1 - LCD_CURVE_Y0) / 4;
+        uint16_t gridColor = (g == 2) ? ST77XX_WHITE : ST77XX_BLUE;
+        lcdDrawHLine(LCD_CURVE_X0 + 1, y, LCD_CURVE_X1 - LCD_CURVE_X0 - 1, gridColor);
+    }
+}
+
+// 固定框架（边框 + 刻度标签 + 网格）：只在初始化/首次清空时绘制一次
+inline void lcdCurveDrawFrame() {
+    if (_lcdFrameDrawn) return;
+    _lcdFrameDrawn = true;
+    lcdDrawRect(LCD_CURVE_X0, LCD_CURVE_Y0,
+                LCD_CURVE_X1 - LCD_CURVE_X0 + 1,
+                LCD_CURVE_Y1 - LCD_CURVE_Y0 + 1, ST77XX_WHITE);
+    lcdCurveDrawLabels();
+    lcdCurveDrawGrid();
 }
 
 // 在标题栏右侧显示最新值（ppb，大字号，位于曲线区域之外不遮挡曲线）
@@ -267,21 +285,17 @@ inline void lcdCurveDrawLatest(float lastPpb) {
     lcdPrintText(tx + 2, ty + 1, buf, ST77XX_YELLOW, 2);
 }
 
-// 重绘曲线区域（清屏 + 刻度网格 + 本次测试折线）
+// 重绘曲线区域（只刷新内部：清内部 + 网格 + 折线；边框/刻度标签固定不动）
 // 横轴：本次测试的数据点均匀分布在 X0~X1（按实际点数缩放）
 inline void lcdCurveRedraw() {
     if (!_tft) return;
 
-    // 清空曲线区域
-    lcdFillRect(LCD_CURVE_X0, LCD_CURVE_Y0,
-                LCD_CURVE_X1 - LCD_CURVE_X0 + 1,
-                LCD_CURVE_Y1 - LCD_CURVE_Y0 + 1, ST77XX_BLACK);
-    // 边框
-    lcdDrawRect(LCD_CURVE_X0, LCD_CURVE_Y0,
-                LCD_CURVE_X1 - LCD_CURVE_X0 + 1,
-                LCD_CURVE_Y1 - LCD_CURVE_Y0 + 1, ST77XX_WHITE);
-    // Y轴刻度与网格
-    lcdCurveDrawScale();
+    // 只清曲线内部（保留 1px 边框）
+    lcdFillRect(LCD_CURVE_X0 + 1, LCD_CURVE_Y0 + 1,
+                LCD_CURVE_X1 - LCD_CURVE_X0 - 1,
+                LCD_CURVE_Y1 - LCD_CURVE_Y0 - 1, ST77XX_BLACK);
+    // 网格（先画，折线叠其上；每次重画但位置固定、开销极小，无可见刷新）
+    lcdCurveDrawGrid();
 
     if (_curveCount == 0) return;
     if (_curveCount == 1) {  // 单点画圆点
@@ -328,9 +342,10 @@ inline void lcdCurveEnd(float avgPpb, float lastPpb) {
     lcdPrintText(5, y3, buf, ST77XX_YELLOW, 2);
 }
 
-// 测试开始：清空曲线缓存并重绘框架
+// 测试开始：清空曲线缓存并重绘（固定框架只画一次，不清除）
 inline void lcdCurveReset() {
     _curveCount = 0;
+    lcdCurveDrawFrame();   // 首次绘制固定框架（边框/刻度/网格），此后不再重画
     lcdCurveRedraw();
     lcdShowInfo(0.0f, 0.0f, 0.0f, 0.0f);
 }
@@ -347,13 +362,14 @@ inline void lcdShowInfo(float wa_mv, float ppb, float flow, float duty) {
     lcdPrintText(5, infoY + 12, b2, ST77XX_WHITE, 1);
 }
 
-// 初始化曲线界面（清屏 + 标题 + 版本号 + 空曲线框架）
+// 初始化曲线界面（清屏 + 标题 + 版本号 + 固定框架）
 inline void lcdCurveInit(const char* title) {
     if (!_tft) return;
     lcdFillScreen(ST77XX_BLACK);
     lcdPrintText(5, 5, title, ST77XX_WHITE, 1);
     lcdPrintText(70, 5, LCD_FW_VERSION, ST77XX_GREEN, 1);  // 版本号（标题右侧）
     lcdPrintText(285, 5, "ppm", ST77XX_WHITE, 1);
+    _lcdFrameDrawn = false;   // 强制首次绘制固定框架
     lcdCurveReset();
 }
 
