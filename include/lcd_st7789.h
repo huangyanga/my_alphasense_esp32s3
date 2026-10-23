@@ -270,7 +270,7 @@ inline void lcdFormatPpm(float v, char* buf, size_t n) {
     if (len > 1 && buf[len - 1] == '.') { buf[len - 1] = '\0'; }
 }
 
-// 刻度标签（当前纵轴范围 5 等分，先擦除旧标签区再重画）
+// 刻度标签（固定位置，数值随纵轴范围变化；范围变化时才重画）
 inline void lcdCurveDrawLabels() {
     if (!_tft) return;
     // 擦除左侧标签区（x < X0）
@@ -278,33 +278,39 @@ inline void lcdCurveDrawLabels() {
     char buf[12];
     for (int g = 0; g <= 4; g++) {
         float v = _lcdYMin + (_lcdYMax - _lcdYMin) * g / 4.0f;
-        int y = lcdCurveY(v);
+        int y = LCD_CURVE_Y1 - g * (LCD_CURVE_Y1 - LCD_CURVE_Y0) / 4;   // 固定行位置
         lcdFormatPpm(v, buf, sizeof(buf));
         int w = strlen(buf) * 6;
         lcdPrintText(LCD_CURVE_X0 - 3 - w, y - 4, buf, ST77XX_WHITE, 1);
     }
 }
 
+// 纵轴单位（画在曲线区左上角内部，作为轴单位标记，静态）
+inline void lcdCurveDrawUnit() {
+    lcdPrintText(LCD_CURVE_X0 + 2, LCD_CURVE_Y0 + 2, "ppm", ST77XX_WHITE, 1);
+}
+
 // 固定框架标志：true 后边框不再重画（测试开始也不清）
 static bool _lcdFrameDrawn = false;
 
-// 网格线（当前范围 25% / 50% / 75% 三条内部水平线，中线白色）
+// 网格线（固定像素位置：25% / 50% / 75% 处，永不移动；中线白色）
+// 纵轴范围变化只影响刻度数值，不影响横线位置
 inline void lcdCurveDrawGrid() {
     for (int g = 1; g <= 3; g++) {
-        float v = _lcdYMin + (_lcdYMax - _lcdYMin) * g / 4.0f;
-        int y = lcdCurveY(v);
+        int y = LCD_CURVE_Y1 - g * (LCD_CURVE_Y1 - LCD_CURVE_Y0) / 4;
         uint16_t gridColor = (g == 2) ? ST77XX_WHITE : ST77XX_BLUE;
         lcdDrawHLine(LCD_CURVE_X0 + 1, y, LCD_CURVE_X1 - LCD_CURVE_X0 - 1, gridColor);
     }
 }
 
-// 固定框架（边框 + 初始刻度 + 网格）：只在初始化/首次清空时绘制一次
+// 固定框架（边框 + 单位 + 初始刻度 + 网格）：只在初始化/首次清空时绘制一次
 inline void lcdCurveDrawFrame() {
     if (_lcdFrameDrawn) return;
     _lcdFrameDrawn = true;
     lcdDrawRect(LCD_CURVE_X0, LCD_CURVE_Y0,
                 LCD_CURVE_X1 - LCD_CURVE_X0 + 1,
                 LCD_CURVE_Y1 - LCD_CURVE_Y0 + 1, ST77XX_WHITE);
+    lcdCurveDrawUnit();    // 纵轴单位 ppm
     lcdCurveDrawLabels();
     lcdCurveDrawGrid();
     _lcdYMinPrev = _lcdYMin;
@@ -339,12 +345,13 @@ inline void lcdCurveRedraw() {
                          fabsf(_lcdYMax - _lcdYMaxPrev) > 0.001f);
 
     if (rangeChanged) {
-        // 范围变化：整区重画（清内部 + 网格 + 刻度）
+        // 范围变化：整区重画（清内部 + 网格 + 刻度 + 单位；网格仍在固定位置）
         lcdFillRect(LCD_CURVE_X0 + 1, LCD_CURVE_Y0 + 1,
                     LCD_CURVE_X1 - LCD_CURVE_X0 - 1,
                     LCD_CURVE_Y1 - LCD_CURVE_Y0 - 1, ST77XX_BLACK);
         lcdCurveDrawGrid();
         lcdCurveDrawLabels();
+        lcdCurveDrawUnit();
         _lcdYMinPrev = _lcdYMin;
         _lcdYMaxPrev = _lcdYMax;
     } else {
