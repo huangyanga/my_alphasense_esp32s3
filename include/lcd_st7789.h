@@ -51,7 +51,7 @@ static Adafruit_ST7789* _tft    = nullptr;
                                  // （方案B板无XL9555，若实测发现电源需GPIO使能，改成对应脚号）
 
 // 固件版本号（显示在LCD标题栏右侧）
-#define LCD_FW_VERSION      "1.0.00"
+#define LCD_FW_VERSION      "1.0.01"
 
 static bool _lcdVariantB = false;  // true = IO10 低电平，RST/BL 用直连 GPIO
 
