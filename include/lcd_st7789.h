@@ -340,25 +340,29 @@ inline void lcdCurveDrawLatest(float lastPpb) {
 }
 
 // 重绘曲线区域（只刷新曲线本身；边框/网格永不整区清除）
-//  - 纵轴范围变化 → 用"旧"范围擦除旧折线（擦到原位），仅重画刻度数值
-//  - 范围不变     → 只擦除旧折线
+//  - 纵轴范围有任何差异 → 用"旧"范围精确擦除旧折线（擦到原位，无残留），
+//    刻度数值仅明显变化（>0.001）时重画，避免位带屏标签列每帧重刷
+//  - 范围完全未变       → 只擦除旧折线
 //  - 网格线始终不清除重画：仅在擦除后按固定位置补画，修复折线压过的交叉点，肉眼无感
 inline void lcdCurveRedraw() {
     if (!_tft) return;
 
     // 自适应纵轴范围（按当前窗口数据）
     lcdCurveCalcYRange();
-    bool rangeChanged = (fabsf(_lcdYMin - _lcdYMinPrev) > 0.001f ||
+    // 位级精确比较：范围有任何差异都用精确"旧"范围擦除，杜绝 0.001 阈值造成的擦位偏差残留
+    bool rangeDiff = (_lcdYMin != _lcdYMinPrev || _lcdYMax != _lcdYMaxPrev);
+    // 刻度数值可见差异才重画（标签列在 x<X0，与折线无关；仅避免位带屏每帧整列重刷）
+    bool rangeVisible = (fabsf(_lcdYMin - _lcdYMinPrev) > 0.001f ||
                          fabsf(_lcdYMax - _lcdYMaxPrev) > 0.001f);
 
-    if (rangeChanged) {
-        // 范围变化：用旧映射擦除旧折线（网格/单位不重画），刻度数值随新范围重画
+    if (rangeDiff) {
+        // 范围变化：用精确旧范围擦除旧折线（网格/单位不重画），刻度仅明显变化时重画
         lcdCurveErasePrevRange(_lcdYMinPrev, _lcdYMaxPrev);
-        lcdCurveDrawLabels();
         _lcdYMinPrev = _lcdYMin;
         _lcdYMaxPrev = _lcdYMax;
+        if (rangeVisible) lcdCurveDrawLabels();
     } else {
-        // 范围不变：只擦除上次折线（网格/刻度保持不动）
+        // 范围完全未变：只擦除上次折线（网格/刻度保持不动）
         lcdCurveErasePrev();
     }
 
