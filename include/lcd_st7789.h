@@ -227,8 +227,9 @@ inline void lcdDrawHLine(int16_t x, int16_t y, int16_t w, uint16_t c);
 inline void lcdDrawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t c);
 inline void lcdFillCircle(int16_t x, int16_t y, int16_t r, uint16_t c);
 inline void lcdPrintText(int16_t x, int16_t y, const char* s, uint16_t c, uint8_t size);
-inline void lcdCurveSavePrev();   // 前向声明（定义见下方位带渲染区）
-inline void lcdCurveErasePrev();  // 前向声明（定义见下方位带渲染区）
+inline void lcdCurveSavePrev();        // 前向声明（定义见下方位带渲染区）
+inline void lcdCurveErasePrev();       // 前向声明（定义见下方位带渲染区）
+inline void lcdCurveErasePrevRange(float yMin, float yMax);  // 按指定纵轴范围擦除（范围变化时用旧范围擦原位）
 
 // ------------------------------------------------------------
 // 纵轴自适应：按本次测试窗口内数据 min/max 动态缩放，便于观看
@@ -238,12 +239,17 @@ static float _lcdYMax = LCD_CURVE_PPM_MAX;
 static float _lcdYMinPrev = 1e9f;            // 上次范围（判断刻度是否需要重画）
 static float _lcdYMaxPrev = -1e9f;
 
-// 值 -> Y 坐标（_lcdYMin~_lcdYMax 映射到 Y1~Y0，支持负值）
-inline int lcdCurveY(float v) {
-    float ratio = (v - _lcdYMin) / (_lcdYMax - _lcdYMin);
+// 值 -> Y 坐标（yMin~yMax 映射到 Y1~Y0，支持负值；越界钳位）
+inline int lcdCurveYIn(float v, float yMin, float yMax) {
+    float ratio = (v - yMin) / (yMax - yMin);
     if (ratio < 0.0f) ratio = 0.0f;
     if (ratio > 1.0f) ratio = 1.0f;
     return LCD_CURVE_Y1 - (int)(ratio * (LCD_CURVE_Y1 - LCD_CURVE_Y0));
+}
+
+// 值 -> Y 坐标（使用当前纵轴范围）
+inline int lcdCurveY(float v) {
+    return lcdCurveYIn(v, _lcdYMin, _lcdYMax);
 }
 
 // 计算自适应纵轴范围（当前窗口数据 min/max ± 15% 边距，最小跨度0.05ppm）
@@ -333,9 +339,10 @@ inline void lcdCurveDrawLatest(float lastPpb) {
     lcdPrintText(tx + 2, ty + 1, buf, ST77XX_YELLOW, 2);
 }
 
-// 重绘曲线区域（只刷新内部；边框固定不动）
-//  - 纵轴范围变化 → 整区重画（清内部+网格+刻度，旧折线随之清除）
-//  - 范围不变     → 只擦除旧折线，网格/刻度保持不动（三条横线位置不变时不刷新）
+// 重绘曲线区域（只刷新曲线本身；边框/网格永不整区清除）
+//  - 纵轴范围变化 → 用"旧"范围擦除旧折线（擦到原位），仅重画刻度数值
+//  - 范围不变     → 只擦除旧折线
+//  - 网格线始终不清除重画：仅在擦除后按固定位置补画，修复折线压过的交叉点，肉眼无感
 inline void lcdCurveRedraw() {
     if (!_tft) return;
 
@@ -345,13 +352,9 @@ inline void lcdCurveRedraw() {
                          fabsf(_lcdYMax - _lcdYMaxPrev) > 0.001f);
 
     if (rangeChanged) {
-        // 范围变化：整区重画（清内部 + 网格 + 刻度 + 单位；网格仍在固定位置）
-        lcdFillRect(LCD_CURVE_X0 + 1, LCD_CURVE_Y0 + 1,
-                    LCD_CURVE_X1 - LCD_CURVE_X0 - 1,
-                    LCD_CURVE_Y1 - LCD_CURVE_Y0 - 1, ST77XX_BLACK);
-        lcdCurveDrawGrid();
+        // 范围变化：用旧映射擦除旧折线（网格/单位不重画），刻度数值随新范围重画
+        lcdCurveErasePrevRange(_lcdYMinPrev, _lcdYMaxPrev);
         lcdCurveDrawLabels();
-        lcdCurveDrawUnit();
         _lcdYMinPrev = _lcdYMin;
         _lcdYMaxPrev = _lcdYMax;
     } else {
@@ -359,27 +362,32 @@ inline void lcdCurveRedraw() {
         lcdCurveErasePrev();
     }
 
-    if (_curveCount == 0) return;
+    // 补画网格（固定像素位置，修复折线擦除时蹭掉的交叉点；不整区清除，无闪烁）
+    lcdCurveDrawGrid();
 
-    // 显示最近 _lcdCurveWindowPts 个点
-    uint16_t n = _curveCount;
-    uint16_t start = 0;
-    if (n > _lcdCurveWindowPts) { start = n - _lcdCurveWindowPts; n = _lcdCurveWindowPts; }
+    if (_curveCount > 0) {
+        // 显示最近 _lcdCurveWindowPts 个点
+        uint16_t n = _curveCount;
+        uint16_t start = 0;
+        if (n > _lcdCurveWindowPts) { start = n - _lcdCurveWindowPts; n = _lcdCurveWindowPts; }
 
-    if (n == 1) {  // 单点画圆点
-        lcdFillCircle(LCD_CURVE_X0, lcdCurveY(_curveBuf[start]), 2, ST77XX_GREEN);
-        return;
+        if (n == 1) {  // 单点画圆点
+            lcdFillCircle(LCD_CURVE_X0, lcdCurveY(_curveBuf[start]), 2, ST77XX_GREEN);
+        } else {
+            int span = LCD_CURVE_X1 - LCD_CURVE_X0;
+            uint16_t denom = (_lcdCurveWindowPts > 1) ? (_lcdCurveWindowPts - 1) : 1;
+            for (uint16_t i = 1; i < n; i++) {
+                int x1 = LCD_CURVE_X0 + (int)((long)(i - 1) * span / denom);
+                int x2 = LCD_CURVE_X0 + (int)((long)i * span / denom);
+                int y1 = lcdCurveY(_curveBuf[start + i - 1]);
+                int y2 = lcdCurveY(_curveBuf[start + i]);
+                lcdDrawLine(x1, y1, x2, y2, ST77XX_GREEN);
+            }
+        }
     }
 
-    int span = LCD_CURVE_X1 - LCD_CURVE_X0;
-    uint16_t denom = (_lcdCurveWindowPts > 1) ? (_lcdCurveWindowPts - 1) : 1;
-    for (uint16_t i = 1; i < n; i++) {
-        int x1 = LCD_CURVE_X0 + (int)((long)(i - 1) * span / denom);
-        int x2 = LCD_CURVE_X0 + (int)((long)i * span / denom);
-        int y1 = lcdCurveY(_curveBuf[start + i - 1]);
-        int y2 = lcdCurveY(_curveBuf[start + i]);
-        lcdDrawLine(x1, y1, x2, y2, ST77XX_GREEN);
-    }
+    // 纵轴单位永远画在最上层（防止被折线或擦除覆盖）
+    lcdCurveDrawUnit();
 }
 
 // 添加一个数据点（值单位: ppm）并重绘（测试运行中实时调用）
@@ -452,11 +460,11 @@ inline void lcdCurveSavePrev() {
     }
 }
 
-// 用黑色重画上次折线以擦除（范围不变时调用；网格/刻度不受影响）
-inline void lcdCurveErasePrev() {
+// 用黑色重画上次折线以擦除（按指定纵轴范围映射；范围变化时用旧范围，保证擦到原位）
+inline void lcdCurveErasePrevRange(float yMin, float yMax) {
     if (_curvePrevCount == 0) return;
     if (_curvePrevCount == 1) {
-        lcdFillCircle(LCD_CURVE_X0, lcdCurveY(_curvePrev[0]), 2, ST77XX_BLACK);
+        lcdFillCircle(LCD_CURVE_X0, lcdCurveYIn(_curvePrev[0], yMin, yMax), 2, ST77XX_BLACK);
         return;
     }
     int span = LCD_CURVE_X1 - LCD_CURVE_X0;
@@ -464,10 +472,15 @@ inline void lcdCurveErasePrev() {
     for (uint16_t i = 1; i < _curvePrevCount; i++) {
         int x1 = LCD_CURVE_X0 + (int)((long)(i - 1) * span / denom);
         int x2 = LCD_CURVE_X0 + (int)((long)i * span / denom);
-        int y1 = lcdCurveY(_curvePrev[i - 1]);
-        int y2 = lcdCurveY(_curvePrev[i]);
+        int y1 = lcdCurveYIn(_curvePrev[i - 1], yMin, yMax);
+        int y2 = lcdCurveYIn(_curvePrev[i], yMin, yMax);
         lcdDrawLine(x1, y1, x2, y2, ST77XX_BLACK);
     }
+}
+
+// 用黑色重画上次折线以擦除（使用当前纵轴范围；网格/刻度不受影响）
+inline void lcdCurveErasePrev() {
+    lcdCurveErasePrevRange(_lcdYMin, _lcdYMax);
 }
 
 // 底部实时信息区（wa=信号mV, ppb=浓度, flow=流量sccm, duty=泵占空比%）
