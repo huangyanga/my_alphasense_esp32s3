@@ -214,6 +214,7 @@ inline Adafruit_ST7789* lcdGetTft() {
 
 static float    _curveBuf[LCD_CURVE_POINTS];
 static uint16_t _curveCount = 0;        // 本次测试已有点数
+static uint16_t _lcdCurveWindowPts = LCD_CURVE_WINDOW;  // 横轴窗口点数（默认；测试时=下行时长秒数）
 
 // ------------------------------------------------------------
 // 渲染分派层前向声明（定义见下方位带渲染区）
@@ -324,8 +325,9 @@ inline void lcdCurveDrawLatest(float lastPpb) {
     lcdPrintText(tx + 2, ty + 1, buf, ST77XX_YELLOW, 2);
 }
 
-// 重绘曲线区域（只刷新内部：自适应纵轴 + 网格 + 滑动窗口折线；边框固定不动）
-// 横轴：显示最近 LCD_CURVE_WINDOW 个点，固定间距，新点从右逐点进入（滑动窗口）
+// 重绘曲线区域（只刷新内部：自适应纵轴 + 网格 + 横轴窗口折线；边框固定不动）
+// 横轴：以 _lcdCurveWindowPts（下行测试时长秒数）为整宽范围，固定间距逐点右移，
+//       测试结束时恰好铺满整宽
 inline void lcdCurveRedraw() {
     if (!_tft) return;
 
@@ -348,10 +350,10 @@ inline void lcdCurveRedraw() {
 
     if (_curveCount == 0) return;
 
-    // 取最近 LCD_CURVE_WINDOW 个点
+    // 显示最近 _lcdCurveWindowPts 个点
     uint16_t n = _curveCount;
     uint16_t start = 0;
-    if (n > LCD_CURVE_WINDOW) { start = n - LCD_CURVE_WINDOW; n = LCD_CURVE_WINDOW; }
+    if (n > _lcdCurveWindowPts) { start = n - _lcdCurveWindowPts; n = _lcdCurveWindowPts; }
 
     if (n == 1) {  // 单点画圆点
         lcdFillCircle(LCD_CURVE_X0, lcdCurveY(_curveBuf[start]), 2, ST77XX_GREEN);
@@ -359,9 +361,10 @@ inline void lcdCurveRedraw() {
     }
 
     int span = LCD_CURVE_X1 - LCD_CURVE_X0;
+    uint16_t denom = (_lcdCurveWindowPts > 1) ? (_lcdCurveWindowPts - 1) : 1;
     for (uint16_t i = 1; i < n; i++) {
-        int x1 = LCD_CURVE_X0 + (int)((long)(i - 1) * span / (LCD_CURVE_WINDOW - 1));
-        int x2 = LCD_CURVE_X0 + (int)((long)i * span / (LCD_CURVE_WINDOW - 1));
+        int x1 = LCD_CURVE_X0 + (int)((long)(i - 1) * span / denom);
+        int x2 = LCD_CURVE_X0 + (int)((long)i * span / denom);
         int y1 = lcdCurveY(_curveBuf[start + i - 1]);
         int y2 = lcdCurveY(_curveBuf[start + i]);
         lcdDrawLine(x1, y1, x2, y2, ST77XX_GREEN);
@@ -403,6 +406,17 @@ inline void lcdCurveReset() {
     lcdCurveDrawFrame();   // 首次绘制固定框架（边框/刻度/网格），此后不再重画
     lcdCurveRedraw();
     lcdShowInfo(0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+// 设置横轴窗口：按下行测试时长（秒）作为整宽范围（1点/秒 → 窗口=秒数），并清空曲线
+// 例：t=60 → 曲线在60秒内从左到右铺满整宽；t=0/1（不限时）→ 用默认窗口
+inline void lcdCurveSetWindow(uint16_t seconds) {
+    _lcdCurveWindowPts = LCD_CURVE_WINDOW;   // 默认窗口
+    if (seconds > 1) {
+        _lcdCurveWindowPts = seconds;
+        if (_lcdCurveWindowPts > LCD_CURVE_POINTS) _lcdCurveWindowPts = LCD_CURVE_POINTS;
+    }
+    lcdCurveReset();
 }
 
 // 底部实时信息区（wa=信号mV, ppb=浓度, flow=流量sccm, duty=泵占空比%）

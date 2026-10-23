@@ -170,9 +170,9 @@ void loop() {
             static bool _lcdPrevRunning = false;  // LCD侧测试状态跟踪
             bool runningNow = protocolTestRunning();
 
-            // 新测试开始：清空曲线缓存
+            // 新测试开始：清空曲线缓存，横轴窗口按下行测试时长(秒)设置
             if (runningNow && !_lcdPrevRunning) {
-                lcdCurveReset();
+                lcdCurveSetWindow((uint16_t)protocolTestDurationS());
             }
 
             protocolUpdate(gasReading, flowReading);

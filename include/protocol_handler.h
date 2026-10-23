@@ -116,6 +116,7 @@ inline void protocolUpdate(const B43FReading& gasReading, const FS4001Reading& f
 inline bool protocolTestRunning();      // 测试是否运行中
 inline float protocolTestAvgPpb();      // 最近一次测试平均浓度 (ppb)
 inline float protocolTestLastPpb();     // 最近一次测试最后浓度 (ppb)
+inline unsigned long protocolTestDurationS();  // 本次测试下行时长(秒)，0=不限时
 inline bool handleCmd_ZERO(const char* line);       // A ZERO 零点校准/清除
 inline bool handleQuery_BASELINE(const char* line); // Q BASELINE 查询零点
 inline void protocolZeroCalUpdate();    // 零点校准采样（主循环调用，内部20Hz节流）
@@ -226,6 +227,9 @@ inline float protocolTestAvgPpb() {
 }
 inline float protocolTestLastPpb() {
     return _testState.last_test_last_ppb;
+}
+inline unsigned long protocolTestDurationS() {
+    return _testState.test_duration_s;
 }
 
 // ============================================================
