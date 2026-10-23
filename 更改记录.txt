@@ -1,0 +1,25 @@
+================ 更改记录 ================
+
+【2026-10-12】流量传感器切换 + CO2 传感器
+- 新增 IO39 流量传感器类型选择脚（config.h FLOW_SELECT_PIN=39）：
+    IO39 低电平 → FS4008：9位串口（38400/SERIAL_8E1）+ FS4000协议，
+    读瞬时流量命令 9D F0 01 08 F9 0D，应答 9D F0 03 FRH FRM FRL CRC 0D，
+    流量=3字节大端/1000(SLPM)，按 sccm 存储
+    IO39 高电平/悬空 → FS4001（原 8N1 查询方式，不变）
+- 新增 SCD30 CO2 传感器驱动（include/scd30.h，I2C 0x61）：
+    与 ADS1115(0x48)/XL9555(0x20) 共用 I2C 总线 SDA=41/SCL=42，地址无冲突
+    触发连续测量(0x0010) → 数据就绪查询(0x0202) → 读测量值(0x0300)，
+    CRC-8(poly 0x31) 校验，输出 CO2(ppm)/温度/湿度
+- LCD 标题栏新增 CO2 浓度显示（每2s刷新，位于版本号右侧）
+- 硬件注意：SCD30 SEL 脚必须悬空/接地（接 VDD 会切到 Modbus）；
+    上电后需 >2s 再访问；SCD30 供电 3.3V
+
+【2026-10-12】v1.0 初始版本
+- 双模式串口协议（HOST/DEBUG）：START/STOP/LAST/ELAPSED/PRESSURE/GAS_TYPE/BASELINE
+- 测试时长自动停止（A START t=秒，到时自动 A STOP）
+- 浓度计算 conc(ppb)=2×ΔV(mV)，STOP_OK 返回平均浓度与最后 wa
+- 零点校准 A ZERO：零气下采样 WE/AE 原始电压取平均，存为 WE_OFFSET_V/AE_OFFSET_V（NVS 持久化）
+- 流量开环控制：0~500sccm 映射泵占空比 50~100%，FS4001 仅监控显示
+- 2.4" ST7789 LCD 曲线界面：单次测试会话曲线、-5~+5ppm 纵轴、avg/last 标注
+- IO10 开机检测双方案：方案A(XL9555+Adafruit) / 方案B(无XL9555+位带逐字节CS选通)
+- release/ 发布目录 + LCD 版本号 v1.0

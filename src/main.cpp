@@ -24,6 +24,7 @@
 #include "valve_controller.h"
 #include "protocol_handler.h"
 #include "lcd_st7789.h"
+#include "scd30.h"
 
 // ------------------------------------------------------------
 // Forward declarations
@@ -66,6 +67,13 @@ void setup() {
     // 初始化气体传感器
     if (!adsInit()) {
         Serial.println(F("[WARN] ADS1115 init failed. Will retry each sample."));
+    }
+
+    // 初始化 SCD30 CO2 传感器（与 ADS1115 共用 I2C 总线 SDA=41/SCL=42）
+    if (!scd30Init()) {
+        Serial.println(F("[WARN] SCD30 init failed."));
+    } else {
+        Serial.println(F("[SCD30] CO2 sensor ready"));
     }
 
     // 初始化流量传感器
@@ -135,6 +143,17 @@ void loop() {
     protocolZeroCalUpdate();
 
     unsigned long now = millis();
+
+    // SCD30 CO2 周期读取（测量间隔2s）并显示到LCD标题栏
+    static unsigned long lastCo2Ms = 0;
+    if (now - lastCo2Ms >= 2000) {
+        lastCo2Ms = now;
+        float co2 = 0.0f, t = 0.0f, rh = 0.0f;
+        if (scd30Read(&co2, &t, &rh)) {
+            lcdShowCo2(co2);
+            Serial.printf("[SCD30] CO2=%.1fppm T=%.1fC RH=%.1f%%\n", co2, t, rh);
+        }
+    }
 
     // 采样周期
     if (now - lastSampleMs >= SAMPLE_INTERVAL_MS) {

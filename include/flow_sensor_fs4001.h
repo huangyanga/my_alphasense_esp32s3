@@ -1,6 +1,9 @@
 #pragma once
 // ============================================================
-// flow_sensor_fs4001.h  –  FS4001-500-CV-A 流量传感器驱动 (RS232)
+// flow_sensor_fs4001.h  –  流量传感器驱动 (RS232)
+//   支持两种传感器，开机由 IO39 自动选择：
+//     IO39 低电平 → FS4008（9位串口 SERIAL_8E1 + FS4000协议）
+//     IO39 高电平 → FS4001（8N1 + 原协议）
 // ============================================================
 // 提供功能：
 //   FS4001Reading struct: 流量数据结构
@@ -9,15 +12,14 @@
 //   flowSensorRead(): 读取流量数据
 //
 // 硬件连接：
-//   ESP32-S3 GPIO17 → FS4001 TX (通过 RS232-TTL 转换器)
-//   ESP32-S3 GPIO18 → FS4001 RX (通过 RS232-TTL 转换器)
+//   ESP32-S3 GPIO17 → 传感器 TX (通过 RS232-TTL 转换器)
+//   ESP32-S3 GPIO18 → 传感器 RX (通过 RS232-TTL 转换器)
 //   电源：8-24V DC，需要 RS232 电平转换器
 //
-// 通信协议：
-//   波特率: 38400
-//   数据位: 8
-//   停止位: 1
-//   校验位: 无
+// FS4001 通信协议：38400/8N1，查询模式
+// FS4008 通信协议：38400/8E1（9位），读瞬时流量 9D F0 01 08 F9 0D，
+//   应答 9D F0 03 FRH FRM FRL CRC 0D，流量=3字节大端÷1000(SLPM)，
+//   本系统按 sccm 存储（SLPM×1000 = 原始3字节值）
 // ============================================================
 
 #include <Arduino.h>
@@ -62,6 +64,13 @@ struct FS4001Reading {
 };
 
 // ------------------------------------------------------------
+// FS4008（FS4000协议）查询命令
+// 读瞬时流量: 9D F0 01 08 F9 0D（F9 = F0^01^08 全异或）
+// ------------------------------------------------------------
+#define FS4008_CMD_READ_FLOW_LEN   6
+#define FS4008_FRAME_TIMEOUT_MS    500   // 应答超时
+
+// ------------------------------------------------------------
 // 模块私有状态 (使用前缀避免与其他模块冲突)
 // ------------------------------------------------------------
 static HardwareSerial* _flowSerial = nullptr;
@@ -70,10 +79,10 @@ static uint8_t _flowErrCount = 0;
 static uint8_t _currentMode = 0xFF;
 static float _flowEma = 0.0f;
 static bool _flowEmaInit = false;
+static bool _flowIsFS4008 = false;   // true=FS4008（IO39低），false=FS4001
 
 // ------------------------------------------------------------
 // 辅助函数声明
-// ------------------------------------------------------------
 static bool sendFS4001Command(uint8_t cmd);
 static bool syncFS4001Sensor();
 static bool parseOperationModeData(const char* buffer, FS4001Reading* reading);
@@ -81,14 +90,23 @@ static bool parseQueryResponse(const char* buffer, FS4001Reading* reading);
 static float parseFloatValue(const char* buffer, const char* prefix);
 static void flushRXBuffer();
 inline bool flowSensorSetMode(uint8_t mode);
+static bool fs4008ReadFlow(FS4001Reading* reading);
 // ------------------------------------------------------------
 // 公共函数实现
 // ------------------------------------------------------------
 
 // flowSensorInit()
-// 初始化流量传感器 UART 通信
+// 初始化流量传感器 UART 通信（开机由 IO39 选择 FS4008/FS4001）
 inline bool flowSensorInit() {
     Serial.println(F("[FS4001] Initializing UART..."));
+
+    // 开机检测 IO39 选择流量传感器类型
+    pinMode(FLOW_SELECT_PIN, INPUT_PULLUP);
+    delay(1);
+    _flowIsFS4008 = (digitalRead(FLOW_SELECT_PIN) == LOW);
+    Serial.printf("[FS4001] IO39=%s -> %s\n",
+                  _flowIsFS4008 ? "LOW" : "HIGH",
+                  _flowIsFS4008 ? "FS4008 (9bit 8E1 + FS4000)" : "FS4001 (8N1)");
 
     // 初始化 UART1 用于流量传感器
     _flowSerial = &Serial1;
@@ -96,7 +114,13 @@ inline bool flowSensorInit() {
     Serial.printf("[FS4001] Configuring Serial1: RX=GPIO%d, TX=GPIO%d, Baud=%d\n",
                   FLOW_RX_PIN, FLOW_TX_PIN, FS4001_BAUD_RATE);
 
-    _flowSerial->begin(FS4001_BAUD_RATE, SERIAL_8N1, FLOW_RX_PIN, FLOW_TX_PIN);
+    // FS4008 每字节11位（起始+8数据+第9位D8+停止），用 8E1 校验位接收第9位；
+    // FS4001 用 8N1
+    if (_flowIsFS4008) {
+        _flowSerial->begin(FS4001_BAUD_RATE, SERIAL_8E1, FLOW_RX_PIN, FLOW_TX_PIN);
+    } else {
+        _flowSerial->begin(FS4001_BAUD_RATE, SERIAL_8N1, FLOW_RX_PIN, FLOW_TX_PIN);
+    }
     _flowSerial->setTimeout(FS4001_RESPONSE_TIMEOUT_MS);
 
     Serial.println(F("[FS4001] Serial1 configured"));
@@ -106,6 +130,13 @@ inline bool flowSensorInit() {
     Serial.println(F("[FS4001] RX buffer flushed"));
 
     delay(100); // 等待传感器启动
+
+    // FS4008：无需同步/模式设置，直接可用
+    if (_flowIsFS4008) {
+        Serial.println(F("[FS4008] Mode: query-based, no sync needed"));
+        _flowSensorOk = true;
+        return true;
+    }
 
     // 尝试与传感器同步
     Serial.println(F("[FS4001] Attempting sensor sync..."));
@@ -173,6 +204,17 @@ inline FS4001Reading flowSensorRead() {
             _flowErrCount = 0;
             Serial.println("[FS4001] Attempting re-initialization...");
             _flowSensorOk = flowSensorInit();
+        }
+        return reading;
+    }
+
+    // FS4008：FS4000协议查询（9D F0 01 08 F9 0D）
+    if (_flowIsFS4008) {
+        reading.valid = fs4008ReadFlow(&reading);
+        if (reading.valid) {
+            reading.data_ready = true;
+            reading.error = false;
+            _flowErrCount = 0;
         }
         return reading;
     }
@@ -258,6 +300,72 @@ static bool syncFS4001Sensor() {
 
     // 【注意】传感器不会响应同步命令，只响应查询命令
     // 所以这里不需要等待和读取响应，直接返回成功
+    return true;
+}
+
+// ------------------------------------------------------------
+// FS4008 读瞬时流量（FS4000协议）
+//   发送: 9D F0 01 08 F9 0D
+//   应答: 9D F0 03 FRH FRM FRL CRC 0D
+//   流量: (FRH<<16 | FRM<<8 | FRL) ÷ 1000 = SLPM
+//         本系统按 sccm 存储：SLPM×1000 = 3字节大端原始值
+//   校验: CRC = F0 ^ 03 ^ FRH ^ FRM ^ FRL
+// ------------------------------------------------------------
+static bool fs4008ReadFlow(FS4001Reading* reading) {
+    if (!_flowSerial) return false;
+
+    flushRXBuffer();
+
+    // 发送查询命令（HEX）
+    static const uint8_t query[FS4008_CMD_READ_FLOW_LEN] = {0x9D, 0xF0, 0x01, 0x08, 0xF9, 0x0D};
+    _flowSerial->write(query, FS4008_CMD_READ_FLOW_LEN);
+    _flowSerial->flush();
+
+    // 找帧头 0x9D（最多等500ms）
+    uint8_t b = 0;
+    unsigned long start = millis();
+    while (millis() - start < FS4008_FRAME_TIMEOUT_MS) {
+        if (_flowSerial->available()) {
+            b = _flowSerial->read();
+            if (b == 0x9D) break;
+        } else {
+            delay(1);
+        }
+    }
+    if (b != 0x9D) {
+        Serial.println(F("[FS4008] No frame header (0x9D)"));
+        return false;
+    }
+
+    // 读取后续 7 字节: F0 03 FRH FRM FRL CRC 0D
+    uint8_t rest[7];
+    int m = _flowSerial->readBytes(rest, 7);
+    if (m < 7) {
+        Serial.printf("[FS4008] Short frame (%d bytes)\n", m);
+        return false;
+    }
+    if (rest[0] != 0xF0 || rest[1] != 0x03) {
+        Serial.printf("[FS4008] Bad frame: 0x%02X 0x%02X\n", rest[0], rest[1]);
+        return false;
+    }
+
+    uint8_t d0 = rest[2], d1 = rest[3], d2 = rest[4], crc = rest[5];
+    uint8_t calc = 0xF0 ^ 0x03 ^ d0 ^ d1 ^ d2;
+    if (calc != crc) {
+        Serial.printf("[FS4008] CRC fail: calc=0x%02X rx=0x%02X\n", calc, crc);
+        return false;
+    }
+
+    uint32_t raw = ((uint32_t)d0 << 16) | ((uint32_t)d1 << 8) | d2;
+    reading->flow_rate = (float)raw;   // sccm（= SLPM × 1000）
+    reading->voltage = 0.0f;
+    reading->voltage_code = 0;
+    reading->mode = 0;
+
+#if FS4001_DEBUG_OUTPUT
+    Serial.printf("[FS4008] Flow: raw=%lu -> %.3f sccm (%.3f SLPM)\n",
+                  raw, reading->flow_rate, raw / 1000.0f);
+#endif
     return true;
 }
 

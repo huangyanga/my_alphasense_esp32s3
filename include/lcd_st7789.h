@@ -357,6 +357,16 @@ inline void lcdCurveInit(const char* title) {
     lcdCurveReset();
 }
 
+// 标题栏显示 CO2 浓度（ppm，位于版本号右侧，不遮挡右上最新值标签）
+inline void lcdShowCo2(float ppm) {
+    if (!_tft) return;
+    char buf[20];
+    snprintf(buf, sizeof(buf), "CO2 %dppm", (int)ppm);
+    int w = strlen(buf) * 6 + 2;
+    lcdFillRect(105, 3, w, 10, ST77XX_BLACK);   // 清背景重绘
+    lcdPrintText(105, 5, buf, ST77XX_WHITE, 1);
+}
+
 // ------------------------------------------------------------
 // 方案B 软件SPI（位带）—— 复刻 STM32 参考代码协议
 // 关键差异：每字节 CS/WR 选通（字节前CS低、字节后CS高），
